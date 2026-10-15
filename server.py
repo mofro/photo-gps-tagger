@@ -576,6 +576,8 @@ PAGE_HTML = """<!DOCTYPE html>
 <title>Location Review</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder@2.4.0/dist/Control.Geocoder.css"/>
+<script src="https://unpkg.com/leaflet-control-geocoder@2.4.0/dist/Control.Geocoder.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #e0e0e0; }
@@ -1181,6 +1183,16 @@ function initMap() {
   });
 
   mapInstance.on('click', e => activateManualPin(e.latlng));
+
+  L.Control.geocoder({
+    defaultMarkGeocode: false,
+    placeholder: 'Search address…',
+    errorMessage: 'No results.',
+    geocoder: L.Control.Geocoder.nominatim({ geocodingQueryParams: { limit: 5 } }),
+  }).on('markgeocode', e => {
+    activateManualPin(e.geocode.center);
+    mapInstance.fitBounds(e.geocode.bbox);
+  }).addTo(mapInstance);
 
   const all = [
     ...CARDS.filter(c => c.proposed_lat).map(c => [c.proposed_lat, c.proposed_lon]),
