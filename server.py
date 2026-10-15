@@ -44,6 +44,7 @@ app = Flask(__name__)
 
 _db       = None
 _db_ready = threading.Event()
+_db_error = None
 
 _state = {
     "status":    "idle",
@@ -55,12 +56,29 @@ _state = {
 }
 
 
+def _is_permission_error(exc):
+    while exc:
+        if isinstance(exc, PermissionError) or getattr(exc, "errno", None) == 1:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 def _load_db():
-    global _db
+    global _db, _db_error
     print("Loading Photos library…", flush=True)
-    _db = osxphotos.PhotosDB()
-    _db_ready.set()
-    print("Library ready.", flush=True)
+    try:
+        _db = osxphotos.PhotosDB()
+        print("Library ready.", flush=True)
+    except Exception as exc:
+        _db_error = exc
+        print(f"Could not load Photos library: {exc}", flush=True)
+        if _is_permission_error(exc):
+            print("Grant Full Disk Access to the app launching this server in "
+                  "System Settings > Privacy & Security > Full Disk Access, "
+                  "then quit and reopen that app.", flush=True)
+    finally:
+        _db_ready.set()
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -156,9 +174,18 @@ def api_db_stats():
 @app.route("/api/months")
 def api_months():
     _db_ready.wait()
+    if _db_error:
+        message = str(_db_error)
+        if _is_permission_error(_db_error):
+            message += (" Grant Full Disk Access to the app launching this server in "
+                        "System Settings > Privacy & Security > Full Disk Access, "
+                        "then quit and reopen that app.")
+        return jsonify({"error": message}), 503
+    excluded = photo_db.get_excluded_uuids()
     no_loc = [
         p for p in _db.photos(images=True)
         if (not p.location or p.location[0] is None) and p.date and not p.screenshot
+        and p.uuid not in excluded
     ]
     by_month = Counter(p.date.strftime("%Y-%m") for p in no_loc)
     top = sorted(by_month.items(), key=lambda x: -x[1])[:12]
@@ -608,6 +635,7 @@ input[type=text]:focus, input[type=date]:focus { outline: none; border-color: #2
                    border-radius: 50%; margin-right: 5px; vertical-align: middle; }
 .dot-orange { background: #f59e0b; }
 .dot-blue   { background: #38bdf8; }
+.dot-manual { background: #a78bfa; }
 
 #assign-banner { display: none; background: #1e3a5f; border-bottom: 1px solid #2563eb;
                  padding: 8px 20px; font-size: 12px; color: #93c5fd;
@@ -817,7 +845,8 @@ footer { padding: 16px; text-align: center; font-size: 11px; color: #333; }
     <div id="map"></div>
     <div class="map-legend">
       <span class="dot-orange"></span> Auto-match &nbsp;
-      <span class="dot-blue"></span> GPS source
+      <span class="dot-blue"></span> GPS source &nbsp;
+      <span class="dot-manual"></span> Manual location
     </div>
   </div>
 
@@ -920,6 +949,7 @@ let curPage     = 0;
 let curFilter   = 'all';
 let mapInstance = null;
 let blueMarkers = {};
+let manualMarker = null;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Panel navigation
@@ -1013,6 +1043,11 @@ document.getElementById('btn-sync').onclick = async () => {
 async function monthsInit() {
   const res  = await fetch('/api/months');
   const data = await res.json();
+  if (!res.ok) {
+    document.getElementById('hstatus').textContent = 'Photos library unavailable';
+    document.getElementById('total-note').textContent = data.error || 'Could not load Photos library.';
+    return;
+  }
   document.getElementById('hstatus').textContent =
     `${data.total.toLocaleString()} unlocated photos total`;
   document.getElementById('total-note').textContent =
@@ -1120,12 +1155,15 @@ function initMap() {
   }).addTo(mapInstance);
 
   blueMarkers = {};
+  manualMarker = null;
+  activePin = null;
 
   // Orange pins — algorithm proposed
   CARDS.forEach((c, i) => {
     if (!c.proposed_lat) return;
     const m = L.circleMarker([c.proposed_lat, c.proposed_lon], {
-      radius: 6, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: .7, weight: 2
+      radius: 6, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: .7,
+      weight: 2, bubblingMouseEvents: false
     }).addTo(mapInstance);
     m.bindPopup(`<b>#${i+1}</b> ${c.target_filename}<br>${c.proposed_lat.toFixed(5)}, ${c.proposed_lon.toFixed(5)}`);
     m.on('click', () => { jumpToCard(i); highlightCard(i); });
@@ -1134,12 +1172,15 @@ function initMap() {
   // Blue pins — all GPS sources
   GPS_SRCS.forEach(g => {
     const m = L.circleMarker([g.lat, g.lon], {
-      radius: 7, color: '#38bdf8', fillColor: '#38bdf8', fillOpacity: .6, weight: 2
+      radius: 7, color: '#38bdf8', fillColor: '#38bdf8', fillOpacity: .6,
+      weight: 2, bubblingMouseEvents: false
     }).addTo(mapInstance);
     m.bindPopup(`<b>${g.filename}</b><br>${g.date}<br>${g.lat.toFixed(5)}, ${g.lon.toFixed(5)}`);
     m.on('click', () => activatePin(g, m));
     blueMarkers[g.uuid] = m;
   });
+
+  mapInstance.on('click', e => activateManualPin(e.latlng));
 
   const all = [
     ...CARDS.filter(c => c.proposed_lat).map(c => [c.proposed_lat, c.proposed_lon]),
@@ -1151,15 +1192,32 @@ function initMap() {
 
 // ── Pin activation ────────────────────────────────────────────────────────
 function activatePin(g, marker) {
-  if (activePin && blueMarkers[activePin.uuid])
-    blueMarkers[activePin.uuid].setStyle({color:'#38bdf8', fillColor:'#38bdf8', weight:2});
+  resetActivePin();
   activePin = g;
   marker.setStyle({color:'#fff', fillColor:'#38bdf8', weight:3});
   updateAssignBanner();
 }
-function clearActivePin() {
+function activateManualPin(latlng) {
+  resetActivePin();
+  const lat = latlng.lat;
+  const lon = latlng.lng;
+  activePin = {lat, lon, uuid:null, filename:'Map location', date:'Manual pin'};
+  manualMarker = L.circleMarker(latlng, {
+    radius: 8, color: '#fff', fillColor: '#a78bfa', fillOpacity: .95,
+    weight: 3, bubblingMouseEvents: false
+  }).addTo(mapInstance);
+  manualMarker.bindPopup(`Manual location<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`).openPopup();
+  manualMarker.on('click', clearActivePin);
+  updateAssignBanner();
+}
+function resetActivePin() {
   if (activePin && blueMarkers[activePin.uuid])
     blueMarkers[activePin.uuid].setStyle({color:'#38bdf8', fillColor:'#38bdf8', weight:2});
+  if (manualMarker && mapInstance) mapInstance.removeLayer(manualMarker);
+  manualMarker = null;
+}
+function clearActivePin() {
+  resetActivePin();
   activePin = null;
   updateAssignBanner();
 }
@@ -1461,6 +1519,8 @@ function goHome() {
   CARDS=[]; GPS_SRCS=[]; ST=[]; activePin=null; curPage=0; curFilter='all';
   if(mapInstance){mapInstance.remove();mapInstance=null;}
   showPanel('panel-setup');
+  loadDbStats();
+  monthsInit();
 }
 document.getElementById('btn-start-over').onclick = goHome;
 document.querySelectorAll('.sz-btn').forEach(btn => {

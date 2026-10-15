@@ -21,6 +21,9 @@ GPS history.
 
 - macOS with Photos.app
 - Python 3.13
+- Full Disk Access for the app that launches the server (for example, Terminal
+   or VS Code). Enable it in **System Settings → Privacy & Security → Full Disk
+   Access**, then quit and reopen that app before starting the server.
 - Photos.app must have Automation permission for your terminal / the app that
   launches the server
 
