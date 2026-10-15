@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Database files (runtime state, not source)
+photo_gps.db
+.photo_gps.db-lock
+*.db-lock
+
+# Generated review exports
+review_*.html
+
+# Legacy output
+applied_uuids.txt
