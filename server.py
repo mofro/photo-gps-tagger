@@ -200,16 +200,10 @@ def generate():
                 and (not from_date or p.date.strftime("%Y-%m-%d") >= from_date)
                 and (not to_date   or p.date.strftime("%Y-%m-%d") <= to_date)
             ]
-            missing_count = sum(1 for p in all_candidates if p.ismissing)
-            all_unlocated = [p for p in all_candidates if not p.ismissing]
+            all_unlocated = all_candidates
             total = len(all_unlocated)
-            emit(f"Found {total} unlocated photos in range.")
-            if missing_count:
-                emit(
-                    f"⚠️  {missing_count} iCloud-only photo(s) skipped — "
-                    "files not on disk (Photos → select → right-click → Download Originals).",
-                    warn=True,
-                )
+            icloud_count = sum(1 for p in all_unlocated if p.ismissing)
+            emit(f"Found {total} unlocated photos in range ({icloud_count} iCloud-only).")
 
             # Timestamp distribution warning
             if total:
